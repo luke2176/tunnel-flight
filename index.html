@@ -51,6 +51,26 @@
     height: 4px; margin-top: 6px; background: rgba(120, 200, 255, .18); overflow: hidden;
   }
   #speedFill { height: 100%; width: 0; background: linear-gradient(90deg, #4df, #9f8, #fd5, #f57); }
+
+  /* 생명(하트) */
+  #lives { margin-top: 6px; font-size: 15px; letter-spacing: 3px; line-height: 1; }
+  #lives .heart { color: #ff5a7a; text-shadow: 0 0 8px rgba(255, 90, 122, .9); }
+  #lives .heart.empty { color: rgba(255, 255, 255, .18); text-shadow: none; }
+
+  /* 구슬 게이지 바 (채워지면 하트 1칸 회복) */
+  #orbBar {
+    height: 5px; margin-top: 6px; background: rgba(255, 215, 90, .15);
+    border: 1px solid rgba(255, 215, 90, .3); overflow: hidden;
+  }
+  #orbFill {
+    height: 100%; width: 0;
+    background: linear-gradient(90deg, #fd5, #fe8, #fff3b0);
+    box-shadow: 0 0 10px rgba(255, 220, 120, .8);
+    transition: width .18s ease-out;
+  }
+  #orbBar.full #orbFill { animation: orbPulse .5s ease-out; }
+  @keyframes orbPulse { 0% { filter: brightness(2); } 100% { filter: brightness(1); } }
+
   #hint {
     position: fixed; bottom: 12px; left: 0; right: 0; text-align: center;
     font-size: 11px; letter-spacing: 2px; opacity: .45; pointer-events: none;
@@ -147,6 +167,8 @@
       <div class="label">SCORE</div>
       <div class="value" id="score">0</div>
       <div class="sub" id="diffBadge">난이도 중</div>
+      <div id="lives"></div>
+      <div id="orbBar"><div id="orbFill"></div></div>
     </div>
   </div>
   <div class="center">
@@ -190,7 +212,7 @@
   <p>
     <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / 방향키로 조종 &nbsp;·&nbsp; 화면을 누른 채 움직이면 조이스틱<br>
     <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> 난이도 선택 &nbsp;·&nbsp; <kbd>Space</kbd> 출발 &nbsp;·&nbsp; <kbd>Esc</kbd> 일시정지 &nbsp;·&nbsp; <kbd>M</kbd> 음소거<br>
-    구슬 +50 &nbsp;·&nbsp; 장애물을 아슬아슬하게 스치면 +20~50 (빠를수록 ↑)
+    목숨 ♥×3 &nbsp;·&nbsp; 구슬 +50 (5개 모으면 ♥+1) &nbsp;·&nbsp; 아슬아슬 통과 +20~50
   </p>
 </div>
 
@@ -239,6 +261,12 @@
   const FADE_DIST = 12;          // 장애물 페이드 인 거리
   const LOD_FOG = 0.35;          // 이 fog 값 미만의 먼 박스는 단색 렌더(그라데이션 생략)
 
+  // 생명 / 구슬 게이지
+  const START_LIVES = 3;         // 시작 목숨 수
+  const MAX_LIVES = 5;           // 최대 목숨 수
+  const ORBS_PER_LIFE = 5;       // 구슬 몇 개로 게이지(바) 한 칸을 채우는가
+  const INVULN_TIME = 1.5;       // 피격 후 무적 시간(초) — 연속 충돌 방지
+
   const DIFFS = {
     easy:   { name: '하', start: 13, max: 30, accel: 0.22, gapStart: 1.35, gapMin: 0.85, levelRate: 1 / 18, levelBase: 0, hit: 0.10, mult: 1 },
     normal: { name: '중', start: 16, max: 42, accel: 0.35, gapStart: 1.10, gapMin: 0.62, levelRate: 1 / 12, levelBase: 0, hit: 0.13, mult: 1.5 },
@@ -259,6 +287,7 @@
   const ctx = canvas.getContext('2d');
   const elHud = $('hud'), elScore = $('score'), elSpeed = $('speed'), elBest = $('best');
   const elSpeedFill = $('speedFill'), elDiffBadge = $('diffBadge'), elMuteBadge = $('muteBadge');
+  const elLives = $('lives'), elOrbBar = $('orbBar'), elOrbFill = $('orbFill');
   const elFlash = $('flash');
   const elMenu = $('menu'), elOver = $('over'), elPause = $('pause');
   const diffButtons = Array.from(document.querySelectorAll('.diff'));
@@ -296,6 +325,7 @@
   let px = 0, py = 0, pvx = 0, pvy = 0, roll = 0;
   let speed = 14, dist = 0, time = 0, bonus = 0;
   let orbCount = 0, nearCount = 0;
+  let lives = START_LIVES, orbGauge = 0, invuln = 0; // 목숨 / 게이지(0~ORBS_PER_LIFE) / 무적 타이머
   let spawnLeft = 0, groupSeq = 0, lastNearGroup = -1;
   let safeX = 0, safeY = 0;   // 직전 패턴이 보장한 안전 통로 중심 (도달 가능성 체크용)
   let boxes = [], orbs = [];
@@ -543,6 +573,7 @@
     px = py = pvx = pvy = roll = 0;
     speed = diff.start; dist = 0; time = 0; bonus = 0;
     orbCount = 0; nearCount = 0;
+    lives = START_LIVES; orbGauge = 0; invuln = 0;
     boxes = []; orbs = []; particles = []; popups = [];
     spawnLeft = 0; lastNearGroup = -1;
     safeX = 0; safeY = 0;
@@ -561,6 +592,50 @@
     paused = p;
     elPause.classList.toggle('hidden', !p);
     if (!p) initAudio();
+  }
+
+  // 플레이어 피격: 무적이 아니면 목숨 1 차감. 0이 되면 게임오버, 아니면 무적시간 부여.
+  function hitPlayer() {
+    if (invuln > 0 || state !== 'play') return;
+    lives--;
+    if (lives <= 0) {
+      lives = 0;
+      gameOver();
+      return;
+    }
+    // 생존: 피격 연출 + 무적 시간
+    invuln = INVULN_TIME;
+    if (!reduceMotion) { shake = 0.7; flash = 0.5; flashColor = '#ff6a6a'; }
+    boom();
+    burst(reduceMotion ? 20 : 50, ['#fff', '#f88', '#f55'], 650);
+    popup('피격!  남은 목숨 ' + lives, '#f88');
+    // 피격 직후 안전하게: 눈앞의 가까운 박스들을 밀어내 즉시 재충돌 방지
+    for (const b of boxes) {
+      if (b.z1 > -1 && b.z0 < 6) { b.passed = true; } // near-miss 중복 방지
+    }
+  }
+
+  // 구슬 획득 시 게이지 충전. 가득 차면 목숨 1 회복(최대치 제한) 후 리셋.
+  function gainOrb() {
+    orbGauge++;
+    if (orbGauge >= ORBS_PER_LIFE) {
+      orbGauge = 0;
+      if (lives < MAX_LIVES) {
+        lives++;
+        if (!reduceMotion) { flash = Math.max(flash, 0.4); flashColor = '#8fe8a0'; }
+        burst(reduceMotion ? 16 : 40, ['#fff', '#9f8', '#6fd'], 600);
+        popup('목숨 +1!  ♥ ' + lives, '#8f8');
+        tone(523, 0.1, 'triangle', 0.2, 784);
+        setTimeout(() => tone(784, 0.18, 'triangle', 0.2, 1046), 90);
+      } else {
+        // 목숨이 최대면 보너스 점수로 전환
+        bonus += 100;
+        popup('MAX!  +100', '#8f8');
+        tone(880, 0.12, 'triangle', 0.16, 1320);
+      }
+      elOrbBar.classList.add('full');
+      setTimeout(() => elOrbBar.classList.remove('full'), 500);
+    }
   }
 
   function gameOver() {
@@ -722,6 +797,7 @@
   function update(dt) {
     if (state === 'play') {
       time += dt;
+      if (invuln > 0) invuln = Math.max(0, invuln - dt);
       speed = Math.min(diff.max, diff.start + time * diff.accel);
       const level = diff.levelBase + time * diff.levelRate;
 
@@ -773,14 +849,14 @@
         }
         // z 스윕: 이번 프레임에 박스 깊이 구간이 카메라 평면(z=0)과 겹쳤는가
         const crossed = b.z0 <= 0 && prevZ1 >= 0;
-        if (crossed) {
+        if (crossed && invuln <= 0) {
           // x/y 스윕: 이동 장애물은 이번 프레임의 이동 전/후 범위를 합집합으로 검사
           const bx0 = Math.min(b.x0, pbx0), bx1 = Math.max(b.x1, pbx1);
           const by0 = Math.min(b.y0, pby0), by1 = Math.max(b.y1, pby1);
           if (px + HIT > bx0 && px - HIT < bx1 &&
               py + HIT > by0 && py - HIT < by1) {
-            gameOver();
-            break;
+            hitPlayer();
+            if (state === 'over') break; // 목숨이 0이 되면 즉시 중단
           }
         }
         if (!b.passed && b.z1 < 0) {
@@ -817,6 +893,7 @@
               popup('+50', '#fd5');
               tone(660, 0.09, 'sine', 0.2, 990);
               setTimeout(() => tone(990, 0.14, 'sine', 0.18, 1480), 70);
+              gainOrb(); // 게이지 충전 → 가득 차면 목숨 회복
             }
           }
         }
@@ -1078,6 +1155,15 @@
     ctx.save();
     ctx.translate(cx, cy);
     ctx.globalCompositeOperation = 'lighter';
+    // 무적(피격 직후) 중에는 보호막 링을 깜빡이며 표시
+    if (invuln > 0) {
+      const blink = 0.4 + 0.4 * Math.abs(Math.sin(time * 18));
+      ctx.strokeStyle = 'rgba(255, 150, 160, ' + blink.toFixed(2) + ')';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.arc(0, 0, 24 + Math.sin(time * 12) * 2, 0, Math.PI * 2);
+      ctx.stroke();
+    }
     ctx.strokeStyle = 'rgba(140, 235, 255, 0.7)';
     ctx.fillStyle = 'rgba(200, 250, 255, 0.9)';
     ctx.lineWidth = 1.5;
@@ -1184,6 +1270,16 @@
     elScore.textContent = currentScore();
     elSpeed.textContent = Math.round(speed * 20) + ' km/h';
     elSpeedFill.style.width = (clamp((speed - diff.start) / (diff.max - diff.start), 0, 1) * 100).toFixed(1) + '%';
+    // 하트 (무적 중이면 깜빡임)
+    let hearts = '';
+    for (let i = 0; i < MAX_LIVES; i++) {
+      if (i < lives) hearts += '<span class="heart">♥</span>';
+      else hearts += '<span class="heart empty">♡</span>';
+    }
+    elLives.innerHTML = hearts;
+    elLives.style.opacity = (invuln > 0 && Math.floor(time * 10) % 2 === 0) ? '0.35' : '1';
+    // 구슬 게이지
+    elOrbFill.style.width = (orbGauge / ORBS_PER_LIFE * 100).toFixed(0) + '%';
   }
 
   // ---------- 루프 ----------
