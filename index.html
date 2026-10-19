@@ -639,27 +639,71 @@
     }
   }
 
-  // 황금 무적 중 박스 파괴: 폭발 이펙트 + 점수
+  // 유리 파편 하나 생성 (화면 좌표 기준)
+  function addShard(x, y, size, cx, cy, power) {
+    // 불규칙 다각형(3~5각) 꼭짓점 — 깨진 유리 조각 모양
+    const n = 3 + (Math.random() * 3 | 0);
+    const verts = [];
+    for (let i = 0; i < n; i++) {
+      const ang = (i / n) * Math.PI * 2 + rand(-0.3, 0.3);
+      const rr = size * rand(0.5, 1);
+      verts.push([Math.cos(ang) * rr, Math.sin(ang) * rr]);
+    }
+    // 폭발 중심(cx,cy)에서 바깥으로 밀려나는 속도 + 약간의 무작위
+    const dx = x - cx, dy = y - cy;
+    const d = Math.hypot(dx, dy) || 1;
+    const spread = power * rand(0.4, 1.1);
+    const life = rand(0.5, 1.1);
+    particles.push({
+      shard: true, verts,
+      x, y,
+      vx: (dx / d) * spread + rand(-80, 80),
+      vy: (dy / d) * spread + rand(-80, 80) - 120, // 살짝 위로 튀어오름
+      rot: rand(0, Math.PI * 2), vrot: rand(-8, 8),
+      gravity: rand(900, 1300),
+      life, max: life
+    });
+  }
+
+  // 황금 무적 중 박스 파괴: 두꺼운 유리 상자가 조각조각 깨지는 이펙트 + 점수
   function destroyBox(b) {
     bonus += 15;
     if (!reduceMotion) {
-      // 박스 중심을 화면 좌표로 변환해 그 자리에서 폭발
-      const cx = (b.x0 + b.x1) / 2, cy = (b.y0 + b.y1) / 2;
       const z = Math.max(b.z0, NEAR);
       const s = focal / z;
-      const sxp = vw / 2 + (cx - px) * s;
-      const syp = vh / 2 - (cy - py) * s;
-      for (let i = 0; i < 14; i++) {
-        const a = rand(0, Math.PI * 2), v = rand(0.15, 1) * 520;
-        const life = rand(0.3, 0.8);
+      // 박스 앞면의 화면상 좌표 범위
+      const sxl = vw / 2 + (b.x0 - px) * s, sxr = vw / 2 + (b.x1 - px) * s;
+      const syt = vh / 2 - (b.y1 - py) * s, syb = vh / 2 - (b.y0 - py) * s;
+      const left = Math.min(sxl, sxr), right = Math.max(sxl, sxr);
+      const top = Math.min(syt, syb), bot = Math.max(syt, syb);
+      const cx = (left + right) / 2, cy = (top + bot) / 2;
+      const bw = right - left, bh = bot - top;
+      // 면적에 비례해 격자로 쪼갬 (너무 많지 않게 상한)
+      const cols = clamp(Math.round(bw / 30), 2, 5);
+      const rows = clamp(Math.round(bh / 30), 2, 5);
+      const cw = bw / cols, ch = bh / rows;
+      const shardSize = Math.max(6, Math.min(cw, ch) * 0.62);
+      const power = 260 + speed * 2;
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const sx2 = left + (c + 0.5) * cw + rand(-cw * 0.15, cw * 0.15);
+          const sy2 = top + (r + 0.5) * ch + rand(-ch * 0.15, ch * 0.15);
+          addShard(sx2, sy2, shardSize, cx, cy, power);
+        }
+      }
+      // 반짝이는 미세 가루 약간
+      for (let i = 0; i < 10; i++) {
+        const a = rand(0, Math.PI * 2), v = rand(0.3, 1) * power;
+        const life = rand(0.25, 0.6);
         particles.push({
-          x: sxp, y: syp, vx: Math.cos(a) * v, vy: Math.sin(a) * v,
-          life, max: life, size: rand(1.5, 4),
-          color: ['#fff', '#fe8', '#fd5', '#fb4'][Math.floor(Math.random() * 4)]
+          x: cx, y: cy, vx: Math.cos(a) * v, vy: Math.sin(a) * v,
+          life, max: life, size: rand(1, 2.5), color: '#dffbff'
         });
       }
     }
-    tone(220 + Math.random() * 120, 0.08, 'square', 0.08, 110);
+    // 유리 깨지는 소리 (고주파 노이즈성)
+    tone(1800 + Math.random() * 900, 0.07, 'square', 0.05, 400);
+    tone(2600 + Math.random() * 700, 0.05, 'triangle', 0.04, 900);
   }
 
   // 구슬 획득 시 게이지 충전. 가득 차면 목숨 1 회복(최대치 제한) 후 리셋.
@@ -983,9 +1027,17 @@
 
     // 파티클 / 팝업
     for (const p of particles) {
-      p.x += p.vx * dt; p.y += p.vy * dt;
-      p.vx *= 1 - dt * 2.2; p.vy *= 1 - dt * 2.2;
-      p.life -= dt;
+      if (p.shard) {
+        p.x += p.vx * dt; p.y += p.vy * dt;
+        p.vy += p.gravity * dt;        // 중력
+        p.vx *= 1 - dt * 0.6;          // 공기저항 (가로)
+        p.rot += p.vrot * dt;
+        p.life -= dt;
+      } else {
+        p.x += p.vx * dt; p.y += p.vy * dt;
+        p.vx *= 1 - dt * 2.2; p.vy *= 1 - dt * 2.2;
+        p.life -= dt;
+      }
     }
     pruneInPlace(particles, (p) => p.life > 0);
     for (const p of popups) p.life -= dt;
@@ -1246,8 +1298,37 @@
   }
 
   function drawEffects() {
+    // 1) 유리 파편 (반투명 유리면 + 밝은 모서리) — 일반 알파 블렌딩
+    ctx.globalCompositeOperation = 'source-over';
+    for (const p of particles) {
+      if (!p.shard) continue;
+      const a = clamp(p.life / p.max, 0, 1);
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.rot);
+      ctx.beginPath();
+      ctx.moveTo(p.verts[0][0], p.verts[0][1]);
+      for (let i = 1; i < p.verts.length; i++) ctx.lineTo(p.verts[i][0], p.verts[i][1]);
+      ctx.closePath();
+      // 유리면 (청록빛, 반투명)
+      ctx.fillStyle = 'rgba(190, 240, 255, ' + (0.28 * a).toFixed(3) + ')';
+      ctx.fill();
+      // 밝은 모서리 하이라이트
+      ctx.strokeStyle = 'rgba(235, 252, 255, ' + (0.9 * a).toFixed(3) + ')';
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+      // 반사 하이라이트 점
+      ctx.fillStyle = 'rgba(255, 255, 255, ' + (0.8 * a).toFixed(3) + ')';
+      ctx.beginPath();
+      ctx.arc(p.verts[0][0] * 0.4, p.verts[0][1] * 0.4, 0.9, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // 2) 일반 파티클 (빛나는 가루/폭발) — 가산 블렌딩
     ctx.globalCompositeOperation = 'lighter';
     for (const p of particles) {
+      if (p.shard) continue;
       const a = p.life / p.max;
       ctx.globalAlpha = a;
       ctx.fillStyle = p.color;
