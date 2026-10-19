@@ -24,6 +24,21 @@
     mix-blend-mode: overlay;
   }
   #flash { background: #fff; opacity: 0; }
+  /* 황금 무적 오버레이 (장애물 파괴 모드) */
+  #frenzy {
+    position: fixed; inset: 0; pointer-events: none; opacity: 0;
+    background:
+      radial-gradient(ellipse at center, rgba(255, 220, 110, 0) 55%, rgba(255, 190, 50, .5) 100%),
+      linear-gradient(0deg, rgba(255, 205, 70, .18), rgba(255, 230, 140, .1));
+    mix-blend-mode: screen;
+    transition: opacity .25s;
+  }
+  #frenzy.on { opacity: 1; }
+  #frenzy::after {
+    content: ""; position: absolute; inset: 0;
+    border: 3px solid rgba(255, 220, 120, .6);
+    box-shadow: inset 0 0 60px rgba(255, 200, 70, .55);
+  }
 
   /* HUD */
   #hud {
@@ -160,6 +175,7 @@
 <div id="vignette"></div>
 <div id="scanlines"></div>
 <div id="flash"></div>
+<div id="frenzy"></div>
 
 <div id="hud" class="dim">
   <div>
@@ -266,6 +282,7 @@
   const MAX_LIVES = 5;           // 최대 목숨 수
   const ORBS_PER_LIFE = 5;       // 구슬 몇 개로 게이지(바) 한 칸을 채우는가
   const INVULN_TIME = 1.5;       // 피격 후 무적 시간(초) — 연속 충돌 방지
+  const FRENZY_TIME = 4;         // 체력 1칸 획득 시 황금 무적(장애물 파괴) 지속 시간(초)
 
   const DIFFS = {
     easy:   { name: '하', start: 13, max: 30, accel: 0.22, gapStart: 1.35, gapMin: 0.85, levelRate: 1 / 18, levelBase: 0, hit: 0.10, mult: 1 },
@@ -289,6 +306,7 @@
   const elSpeedFill = $('speedFill'), elDiffBadge = $('diffBadge'), elMuteBadge = $('muteBadge');
   const elLives = $('lives'), elOrbBar = $('orbBar'), elOrbFill = $('orbFill');
   const elFlash = $('flash');
+  const elFrenzy = $('frenzy');
   const elMenu = $('menu'), elOver = $('over'), elPause = $('pause');
   const diffButtons = Array.from(document.querySelectorAll('.diff'));
 
@@ -326,6 +344,7 @@
   let speed = 14, dist = 0, time = 0, bonus = 0;
   let orbCount = 0, nearCount = 0;
   let lives = START_LIVES, orbGauge = 0, invuln = 0; // 목숨 / 게이지(0~ORBS_PER_LIFE) / 무적 타이머
+  let frenzy = 0;                // 황금 무적(장애물 파괴) 남은 시간(초)
   let spawnLeft = 0, groupSeq = 0, lastNearGroup = -1;
   let safeX = 0, safeY = 0;   // 직전 패턴이 보장한 안전 통로 중심 (도달 가능성 체크용)
   let boxes = [], orbs = [];
@@ -557,6 +576,7 @@
   function showMenu() {
     state = 'menu';
     paused = false;
+    frenzy = 0; invuln = 0;
     boxes = []; orbs = []; popups = [];
     px = py = pvx = pvy = 0;
     elMenu.classList.remove('hidden');
@@ -573,7 +593,7 @@
     px = py = pvx = pvy = roll = 0;
     speed = diff.start; dist = 0; time = 0; bonus = 0;
     orbCount = 0; nearCount = 0;
-    lives = START_LIVES; orbGauge = 0; invuln = 0;
+    lives = START_LIVES; orbGauge = 0; invuln = 0; frenzy = 0;
     boxes = []; orbs = []; particles = []; popups = [];
     spawnLeft = 0; lastNearGroup = -1;
     safeX = 0; safeY = 0;
@@ -619,6 +639,29 @@
     }
   }
 
+  // 황금 무적 중 박스 파괴: 폭발 이펙트 + 점수
+  function destroyBox(b) {
+    bonus += 15;
+    if (!reduceMotion) {
+      // 박스 중심을 화면 좌표로 변환해 그 자리에서 폭발
+      const cx = (b.x0 + b.x1) / 2, cy = (b.y0 + b.y1) / 2;
+      const z = Math.max(b.z0, NEAR);
+      const s = focal / z;
+      const sxp = vw / 2 + (cx - px) * s;
+      const syp = vh / 2 - (cy - py) * s;
+      for (let i = 0; i < 14; i++) {
+        const a = rand(0, Math.PI * 2), v = rand(0.15, 1) * 520;
+        const life = rand(0.3, 0.8);
+        particles.push({
+          x: sxp, y: syp, vx: Math.cos(a) * v, vy: Math.sin(a) * v,
+          life, max: life, size: rand(1.5, 4),
+          color: ['#fff', '#fe8', '#fd5', '#fb4'][Math.floor(Math.random() * 4)]
+        });
+      }
+    }
+    tone(220 + Math.random() * 120, 0.08, 'square', 0.08, 110);
+  }
+
   // 구슬 획득 시 게이지 충전. 가득 차면 목숨 1 회복(최대치 제한) 후 리셋.
   function gainOrb() {
     orbGauge++;
@@ -626,15 +669,19 @@
       orbGauge = 0;
       if (lives < MAX_LIVES) {
         lives++;
-        if (!reduceMotion) { flash = Math.max(flash, 0.4); flashColor = '#8fe8a0'; }
-        burst(reduceMotion ? 16 : 40, ['#fff', '#9f8', '#6fd'], 600);
-        popup('목숨 +1!  ♥ ' + lives, '#8f8');
+        frenzy = FRENZY_TIME; // 황금 무적 발동 — 장애물 파괴
+        if (!reduceMotion) { flash = Math.max(flash, 0.5); flashColor = '#ffe08a'; }
+        burst(reduceMotion ? 16 : 50, ['#fff', '#fe8', '#fd5', '#9f8'], 700);
+        popup('무적!  ♥+1  장애물 파괴', '#fe8');
         tone(523, 0.1, 'triangle', 0.2, 784);
-        setTimeout(() => tone(784, 0.18, 'triangle', 0.2, 1046), 90);
+        setTimeout(() => tone(784, 0.14, 'triangle', 0.2, 1046), 90);
+        setTimeout(() => tone(1046, 0.2, 'triangle', 0.2, 1568), 180);
       } else {
-        // 목숨이 최대면 보너스 점수로 전환
+        // 목숨이 최대면 보너스 점수 + 짧은 황금 무적
         bonus += 100;
-        popup('MAX!  +100', '#8f8');
+        frenzy = FRENZY_TIME;
+        if (!reduceMotion) { flash = Math.max(flash, 0.5); flashColor = '#ffe08a'; }
+        popup('MAX!  무적  +100', '#fe8');
         tone(880, 0.12, 'triangle', 0.16, 1320);
       }
       elOrbBar.classList.add('full');
@@ -644,6 +691,7 @@
 
   function gameOver() {
     state = 'over';
+    frenzy = 0; invuln = 0;
     if (!reduceMotion) { shake = 1; flash = 1; flashColor = '#ff5a5a'; }
     boom();
     burst(reduceMotion ? 30 : 90, ['#fff', '#fd6', '#f84', '#f55'], 900);
@@ -802,6 +850,7 @@
     if (state === 'play') {
       time += dt;
       if (invuln > 0) invuln = Math.max(0, invuln - dt);
+      if (frenzy > 0) frenzy = Math.max(0, frenzy - dt);
       speed = Math.min(diff.max, diff.start + time * diff.accel);
       const level = diff.levelBase + time * diff.levelRate;
 
@@ -853,7 +902,14 @@
         }
         // z 스윕: 이번 프레임에 박스 깊이 구간이 카메라 평면(z=0)과 겹쳤는가
         const crossed = b.z0 <= 0 && prevZ1 >= 0;
-        if (crossed && invuln <= 0) {
+        if (frenzy > 0) {
+          // 황금 무적: 눈앞에 다가온 박스는 충돌 대신 파괴
+          if (!b.destroyed && b.z0 < 5 && b.z1 > -1) {
+            b.destroyed = true;
+            b.passed = true;
+            destroyBox(b);
+          }
+        } else if (crossed && invuln <= 0) {
           // x/y 스윕: 이동 장애물은 이번 프레임의 이동 전/후 범위를 합집합으로 검사
           const bx0 = Math.min(b.x0, pbx0), bx1 = Math.max(b.x1, pbx1);
           const by0 = Math.min(b.y0, pby0), by1 = Math.max(b.y1, pby1);
@@ -880,7 +936,7 @@
           }
         }
       }
-      pruneInPlace(boxes, (b) => b.z1 > -1);
+      pruneInPlace(boxes, (b) => b.z1 > -1 && !b.destroyed);
 
       // 구슬
       if (state === 'play') {
@@ -1160,12 +1216,15 @@
     ctx.translate(cx, cy);
     ctx.globalCompositeOperation = 'lighter';
     // 무적(피격 직후) 중에는 보호막 링을 깜빡이며 표시
-    if (invuln > 0) {
+    if (invuln > 0 || frenzy > 0) {
+      const gold = frenzy > 0;
       const blink = 0.4 + 0.4 * Math.abs(Math.sin(time * 18));
-      ctx.strokeStyle = 'rgba(255, 150, 160, ' + blink.toFixed(2) + ')';
-      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = gold
+        ? 'rgba(255, 215, 110, ' + blink.toFixed(2) + ')'
+        : 'rgba(255, 150, 160, ' + blink.toFixed(2) + ')';
+      ctx.lineWidth = gold ? 3.5 : 2.5;
       ctx.beginPath();
-      ctx.arc(0, 0, 24 + Math.sin(time * 12) * 2, 0, Math.PI * 2);
+      ctx.arc(0, 0, (gold ? 30 : 24) + Math.sin(time * 12) * 2, 0, Math.PI * 2);
       ctx.stroke();
     }
     ctx.strokeStyle = 'rgba(140, 235, 255, 0.7)';
@@ -1267,6 +1326,14 @@
 
     elFlash.style.opacity = reduceMotion ? '0' : flash.toFixed(2);
     elFlash.style.background = flashColor;
+    // 황금 무적 오버레이 (reduced-motion이면 은은하게만)
+    elFrenzy.classList.toggle('on', frenzy > 0);
+    if (frenzy > 0 && frenzy < 1 && !reduceMotion) {
+      // 끝나기 직전 깜빡여 종료 임박 알림
+      elFrenzy.style.opacity = (0.4 + 0.6 * Math.abs(Math.sin(time * 20))).toFixed(2);
+    } else {
+      elFrenzy.style.opacity = '';
+    }
   }
 
   function updateHud() {
